@@ -1,0 +1,509 @@
+---
+title: "Understanding location preferences of firms in the circular economy"
+author: "Maryam Omar & Merten Nefs"
+date: "2025-09-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+options(scipen = 999)
+
+```
+
+## 0. Introduction
+
+This document details how the article's data was summarized and visualized to come to conclusions. 
+
+## 1. Set up libraries and import data 
+
+```{r Import libraries}
+
+# import libraries 
+
+library(sf) 
+library(tidyverse)
+library(vtable)
+library(patchwork)
+
+```
+
+
+```{r Import data prepared earlier}
+
+# import dataset
+
+data_model <- readRDS("data_processed/data_model.rds")
+
+# import polygons of neighborhoods
+
+nbhd_polygon <- readRDS("data_processed/nbhd_polygon.rds")
+
+# import microdata 
+
+microdata <- readRDS("data_processed/microdata.rds")
+
+# import Dutch area boundaries 
+
+nl <- st_read("data_raw/cbs/cbsgebiedsindelingen2022.gpkg", layer = "cbs_landsdeel_2022_gegeneraliseerd")
+
+# import survey data from Nefs & Rienstra (2024)
+
+data <- read_csv("data_raw/Survey/survey.csv")
+
+```
+
+The LISA microdata and the survey dataset from Nefs & Rienstra (2024) do not exist in the repository; authors are not permitted to share it in raw form.
+
+## 2. Descriptives and visualizations on firm-level 
+
+```{r Produce statistics on number of firms before filtering out firms with under 2 jobs that are registered in buildings with a residential purpose}
+
+# calculate number of firms in circular economy 
+
+microdata %>%   
+  filter(!is.na(npce_category)) %>% 
+  summarize(n = n())
+
+# examine each CE pillar's share of CE and also examine each CE pillar's share of the national economy after removing CE firms with less than 2 jobs that are registered in buildings with residential functions
+
+microdata %>%   
+  group_by(npce_category) %>% 
+  summarize(n = n()) %>% 
+  ungroup() %>% 
+  mutate(
+    n_national_economy = sum(n),
+    pct_of_national_economy = n * 100 / n_national_economy,
+    n_CE = sum(n[!is.na(npce_category)]),
+    pct_of_CE = n * 100 / n_CE)
+
+```
+
+```{r Produce statistics on number of firms with less than 2 jobs}
+
+# calculate how many CE firms have jobs < 2 
+
+microdata %>%   
+  filter(!is.na(npce_category)) %>% 
+  filter(jobs < 2) %>% 
+  summarize(n = n())
+
+# calculate, among CE firms with less than 2 jobs, how many and what percentage are registered in buildings with residential functions
+
+microdata %>% 
+   filter(((size_zero == 1 | size_micro_selfemployed == 1))) %>%  
+  filter(!is.na(npce_category)) %>% 
+  group_by(resident) %>% 
+  summarize(n = n()) %>% 
+  ungroup() %>% 
+  mutate(pct = n/sum(n))
+
+```
+
+```{r Produce statistics on final sample of firms }
+
+# calculate number of CE firms after removing CE firms with less than 2 jobs that are registered in buildings with residential functions
+
+microdata %>%   
+  filter((size_zero == 0 & size_micro_selfemployed == 0) |
+           ((size_zero == 1 | size_micro_selfemployed == 1) & resident == 0)) %>% 
+  filter(!is.na(npce_category)) %>% 
+  summarize(n = n())
+
+# examine each CE pillar's share of CE and also examine each CE pillar's share of the national economy after removing CE firms with less than 2 jobs that are registered in buildings with residential functions
+
+microdata %>%   
+  # keep firms > 1 jobs 
+  # keep firms with 0 or 1 job that are not in residential buildings 
+  filter((size_zero == 0 & size_micro_selfemployed == 0) |
+           ((size_zero == 1 | size_micro_selfemployed == 1) & resident == 0)) %>% 
+  group_by(npce_category) %>% 
+  summarize(n = n()) %>% 
+  ungroup() %>% 
+  mutate(
+    total_n = sum(n),
+    total_CE = sum(n[!is.na(npce_category)]),
+    pct_of_CE = n * 100 / total_CE
+  )
+
+
+```
+
+```{r Examine firm size based on final sample of firms}
+
+# create filtered dataset referring to final sample of firms
+
+filter <- microdata %>%   
+  # keep firms > 1 jobs 
+  # keep firms with 0 or 1 job that are not in residential buildings 
+  filter((size_zero == 0 & size_micro_selfemployed == 0) |
+           ((size_zero == 1 | size_micro_selfemployed == 1) & resident == 0)) %>% 
+  mutate(
+    # create micro to include jobs < 10
+    size_micro = size_zero + size_micro_selfemployed + size_micro_not_selfemployed, 
+    # create small-medium enterprise category to include jobs >= 10 - 249 employees
+         size_SME = size_small+ size_medium)
+  
+# create table breaking down firm size classes 
+
+table <- bind_rows(
+  # all firms
+  filter %>%
+    summarise(
+      category = "All economic sectors",
+      size_micro = round(sum(size_micro, na.rm = TRUE) / n() * 100, 2),
+      size_SME = round(sum(size_SME, na.rm = TRUE) / n() * 100, 2),
+      size_large = round(sum(size_large, na.rm = TRUE) / n() * 100, 2)
+    ),
+  # reduction
+  filter %>%
+    filter(npce_category == "reduction") %>%
+    summarise(
+      category = "Reduction",
+      size_micro = round(sum(size_micro, na.rm = TRUE) / n() * 100, 2),
+      size_SME = round(sum(size_SME, na.rm = TRUE) / n() * 100, 2),
+      size_large = round(sum(size_large, na.rm = TRUE) / n() * 100, 2)
+    ),
+  # life extension
+  filter %>%
+    filter(npce_category == "extension") %>%
+    summarise(
+      category = "Extension",
+      size_micro = round(sum(size_micro, na.rm = TRUE) / n() * 100, 2),
+      size_SME = round(sum(size_SME, na.rm = TRUE) / n() * 100, 2),
+      size_large = round(sum(size_large, na.rm = TRUE) / n() * 100, 2)
+    ),
+  # substitution
+  filter %>%
+    filter(npce_category == "substitution") %>%
+    summarise(
+      category = "Substitution",
+      size_micro = round(sum(size_micro, na.rm = TRUE) / n() * 100, 2),
+      size_SME = round(sum(size_SME, na.rm = TRUE) / n() * 100, 2),
+      size_large = round(sum(size_large, na.rm = TRUE) / n() * 100, 2)
+    ),
+  # high quality processing
+  filter %>%
+    filter(npce_category == "processing") %>%
+    summarise(
+      category = "Processing",
+      size_micro = round(sum(size_micro, na.rm = TRUE) / n() * 100, 2),
+      size_SME = round(sum(size_SME, na.rm = TRUE) / n() * 100, 2),
+      size_large = round(sum(size_large, na.rm = TRUE) / n() * 100, 2)
+    )
+)
+
+# reshape table for ggplot
+
+table_long <- pivot_longer(table, 
+                               cols = -category, 
+                               names_to = "Firm_Size", 
+                               values_to = "Percentage")
+
+# set factor levels for ordering
+
+table_long <- table_long %>%
+  mutate(category = factor(category, 
+                          levels = c("All economic sectors", "Reduction", "Substitution", 
+                                   "Extension", "Processing"))) %>%
+  mutate(Firm_Size = factor(Firm_Size, 
+                            levels = c("size_micro", "size_SME", "size_large")))
+
+# define color palette
+
+palette <- c("size_micro" = "#007ec7",
+             "size_SME" = "#ffa500", 
+             "size_large" = "grey")
+
+# create the plot
+
+ggplot(table_long, aes(x = category, y = Percentage, fill = Firm_Size)) +
+  geom_bar(stat = "identity", position = "stack") +
+  geom_text(aes(label = ifelse(Percentage > 3,  
+                               paste0(round(Percentage, 0), "%"), 
+                               "")),
+            position = position_stack(vjust = 0.5), 
+            size = 3, 
+            colour = "white") +
+  scale_fill_manual(values = palette,
+                    labels = c("Micro (<10 employees)", 
+                              "Small & medium (10-249 employees)", 
+                              "Large (>= 250 employees)")) +
+  labs(
+    x = "",  
+    y = "",
+    fill = "", 
+    title = "Firm size distribution",
+    caption = "Note: sample excludes self-employed firms registered in buildings with residential functions") + 
+  theme_classic() +  
+  theme(legend.key.size = unit(1, "lines"), 
+        legend.position = "bottom", 
+        legend.text = element_text(size = 9), 
+        plot.caption = element_text(hjust = 0),
+        axis.text.x = element_text(angle = 0, hjust = 0.5)) +
+  guides(fill = guide_legend(nrow = 1, reverse = FALSE)) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1))
+
+```
+
+## 3. Descriptives and visualizations on neighborhood level 
+
+```{r Calculate average neighborhood size for all neighborhoods in the Netherlands}
+
+nbhd_polygon %>% 
+  mutate(nbhd_area = st_area(geom)) %>% 
+  st_drop_geometry() %>% 
+  summarize(average = mean(nbhd_area))
+
+```
+
+```{r Display initial and final number of neighborhoods in sample}
+
+# before removing neighorhoods where urbanization data is unavailable, neighborhoods where electricity capacity data is unavailable, and neighborhoods with no jobs (regardless of sector)
+
+nbhd_polygon %>% 
+  nrow()
+
+# final sample
+
+data_model %>% 
+  nrow()
+
+```
+
+```{r Calculate number of neighborhoods with 0 firms, per CE pillar}
+
+prop.table(table(data_model$firms_processing_size_not_selfemployed_or_zero_in_residential))
+
+prop.table(table(data_model$firms_substitution_size_not_selfemployed_or_zero_in_residential))
+
+prop.table(table(data_model$firms_extension_size_not_selfemployed_or_zero_in_residential))
+
+prop.table(table(data_model$firms_reduction_size_not_selfemployed_or_zero_in_residential))
+
+
+data.frame(
+  CE_pillar = c("Reduction", "Substitution", "Extension", "Processing"),
+  Percent_neighborhoods_with_zero_firms = c(
+    round(prop.table(table(data_model$firms_reduction_size_not_selfemployed_or_zero_in_residential))[1] * 100, 0),
+    round(prop.table(table(data_model$firms_substitution_size_not_selfemployed_or_zero_in_residential))[1] * 100, 0),
+    round(prop.table(table(data_model$firms_extension_size_not_selfemployed_or_zero_in_residential))[1] * 100, 0),
+    round(prop.table(table(data_model$firms_processing_size_not_selfemployed_or_zero_in_residential))[1] * 100, 0)
+  )
+)
+
+```
+
+```{r Make an overarching descriptives table}
+
+# select variables, not logged 
+
+vars <- c("firms_processing_size_not_selfemployed_or_zero_in_residential",
+          "firms_substitution_size_not_selfemployed_or_zero_in_residential",
+          "firms_extension_size_not_selfemployed_or_zero_in_residential",
+          "firms_reduction_size_not_selfemployed_or_zero_in_residential",
+          "dist_highway",
+          "dist_bimodal",
+          "dist_trimodal",
+          "dist_rail",
+          "electricity_capacity",
+          "business_park",
+          "urbanization",
+          "LQ_A_category",
+          "LQ_B_F_category",
+          "LQ_G_I_category",
+          "LQ_J_N_category",
+          "LQ_O_Q_category",
+          "LQ_R_U_category")
+
+# give variables titles 
+
+var_names <- c(
+  "Number of firms in high-grade processing" = "firms_processing_size_not_selfemployed_or_zero_in_residential",
+  "Number of firms in substitution of raw materials" = "firms_substitution_size_not_selfemployed_or_zero_in_residential",
+  "Number of firms in extension of product lifetime" = "firms_extension_size_not_selfemployed_or_zero_in_residential",
+  "Number of firms in reduction of raw material usage" = "firms_reduction_size_not_selfemployed_or_zero_in_residential",
+  "Distance to nearest highway exit (km)" = "dist_highway",
+  "Distance to nearest bimodal terminal (km)" = "dist_bimodal",
+  "Distance to nearest trimodal terminal (km)" = "dist_trimodal",
+  "Distance to nearest rail transit station (km)" = "dist_rail",
+  "Electricity grid congestion" = "electricity_capacity",
+  "Presence and nuisance level of business park" = "business_park",
+  "Degree of urbanization (average number of addresses/km)" = "urbanization",
+  "Concentration of jobs in agriculture, forestry and fishing" = "LQ_A_category",
+  "Concentration of jobs in industry and energy" = "LQ_B_F_category",
+  "Concentration of jobs in commerce, transportation and hospitality" = "LQ_G_I_category",
+  "Concentration of jobs in commercial services" = "LQ_J_N_category",
+  "Concentration of jobs in government and healthcare" = "LQ_O_Q_category",
+  "Concentration of jobs in culture, recreation and other services" = "LQ_R_U_category"
+)
+
+# rename and convert to factors
+
+table <- data_model %>%
+  st_drop_geometry() %>%
+  select(all_of(vars)) %>%
+  rename(all_of(var_names)) %>%
+  mutate(across(c("Presence and nuisance level of business park", 
+                  "Electricity grid congestion"), as.factor))
+
+# create descriptive summary table
+
+summary_table <- sumtable(table, digits = 2, out = "return")
+summary_table
+```
+
+```{r Map displaying concentration of firms in neighborhoods}
+
+# classify firm sizes
+
+table <- data_model |>
+  mutate(reduction = case_when(firms_reduction_size_not_selfemployed_or_zero_in_residential == 0 ~ "none",
+                               firms_reduction_size_not_selfemployed_or_zero_in_residential == 1 ~ "1",
+                               firms_reduction_size_not_selfemployed_or_zero_in_residential == 2 ~ "2",
+                               firms_reduction_size_not_selfemployed_or_zero_in_residential >2 ~"3 or more"),
+         substitution = case_when(firms_substitution_size_not_selfemployed_or_zero_in_residential == 0 ~ "none",
+                               firms_substitution_size_not_selfemployed_or_zero_in_residential == 1 ~ "1",
+                               firms_substitution_size_not_selfemployed_or_zero_in_residential == 2 ~ "2",
+                               firms_substitution_size_not_selfemployed_or_zero_in_residential >2 ~"3 or more"),
+         extension = case_when(firms_extension_size_not_selfemployed_or_zero_in_residential == 0 ~ "none",
+                               firms_extension_size_not_selfemployed_or_zero_in_residential == 1 ~ "1",
+                               firms_extension_size_not_selfemployed_or_zero_in_residential == 2 ~ "2",
+                               firms_extension_size_not_selfemployed_or_zero_in_residential >2 ~"3 or more"),
+         processing = case_when(firms_processing_size_not_selfemployed_or_zero_in_residential == 0 ~ "none",
+                               firms_processing_size_not_selfemployed_or_zero_in_residential == 1 ~ "1",
+                               firms_processing_size_not_selfemployed_or_zero_in_residential == 2 ~ "2",
+                               firms_processing_size_not_selfemployed_or_zero_in_residential >2 ~"3 or more"),
+               ) 
+
+# create boundary of Netherlands
+
+nl <-  st_union(nl)
+
+# legend palette
+
+cols <- c("none"="white","1"="#BFDFF3","2"="#83B5E3","3 or more"="#2171B5")
+
+# plot
+
+r <- ggplot() +
+  geom_sf(data = table, aes(fill = reduction), color = "white", linewidth = 0) +
+  scale_fill_manual(values = cols) +
+  geom_sf(data = nl, color = "lightgrey", fill = NA) +  
+  labs(title = "Reduction") +
+  theme_classic(base_size = 12) +
+  theme(axis.line = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "none"
+  )
+s <- ggplot() +
+  geom_sf(data = table, aes(fill = substitution), color = "white", linewidth = 0) +
+  # scale_fill_gradient(name = "nr of Reduction firms in neighborhood",low = "white", high = "chartreuse3") +
+  scale_fill_manual(values = cols) +
+  geom_sf(data = nl, color = "lightgrey", fill = NA) +  
+  labs(title = "Substitution") +
+  theme_classic(base_size = 12) +
+  theme(axis.line = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "none"
+  )
+e <- ggplot() +
+  geom_sf(data = table, aes(fill = extension), color = "white", linewidth = 0) +
+  scale_fill_manual(values = cols) +
+  geom_sf(data = nl, color = "lightgrey", fill = NA) +  
+  labs(title = "Extension") +
+  theme_classic(base_size = 12) +
+  theme(axis.line = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "none"
+  )
+p <- ggplot() +
+  geom_sf(data = table, aes(fill = processing), color = "white", linewidth = 0) +
+  scale_fill_manual(values = cols) +
+  geom_sf(data = nl, color = "lightgrey", fill = NA) + 
+  labs(title = "Processing") +
+  theme_classic(base_size = 12) +
+  theme(axis.line = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "none"
+  )
+
+combined <- r + s + e + p & theme(legend.position = "bottom",
+                                  legend.title = element_blank())
+
+combined + plot_layout(guides = "collect")
+
+
+```
+
+## 4. Visualize results of survey by Nefs & Rienstra (2024)
+
+
+```{r Create plot}
+
+# ordering 
+
+table_levels <- data %>% 
+  filter(cat %in% c( "Very important", "Important")) %>% 
+  group_by(LF_label) %>% 
+  dplyr::summarize(perc_obs = sum(perc_obs)) %>% 
+  arrange(desc(perc_obs)) %>% 
+  pull(LF_label) %>%
+  unique()
+
+cat_levels <- c("Unimportant", "Somewhat important", "Fairly important", "Important", "Very important")
+
+table <- data %>% 
+  mutate(LF_label = factor(LF_label, levels = rev(table_levels), 
+                           ordered = TRUE)) |>
+  mutate(cat = factor(cat, levels = cat_levels))
+
+
+# make palette 
+
+palette <- c("Unimportant" = "orange", 
+             "Somewhat important" = "#FFC76D", 
+             "Fairly important" = "lightgrey",
+             "Important" = "#6EBAE4", 
+             "Very important" = "#007ec7")
+
+# plot
+
+figure <- table %>%  
+  ggplot(aes(fill = cat, 
+             y = LF_label, 
+             x = n_obs)) + 
+  geom_bar(position="fill", stat="identity") +
+  geom_text(aes(label = ifelse(perc_obs > 4,  
+                               paste0(round(perc_obs, 0), "%"), 
+                               "")),
+            position = position_fill(vjust = 0.5), 
+            size = 3, 
+            colour = "white") +
+  scale_fill_manual(values = palette) +
+  labs(
+    y = "Location factors",  
+    x = "Firms (%)",
+    title = "Stated preferences of CE firms regarding location factors",
+    fill = "", 
+    caption = "Note: sample consists of 115 CE firms (self-reported)") + 
+  theme_classic() +  
+  theme(legend.key.size = ggplot2::unit(1, "lines"), 
+        legend.position = "bottom", 
+        legend.text = element_text(size = 9), 
+        plot.caption.position =  "plot", 
+        plot.caption = element_text(hjust = 0))  +
+  guides(fill = guide_legend(nrow = 1, reverse = TRUE)) +
+  scale_x_continuous(labels = scales::percent_format()) 
+
+# view
+
+figure
+
+```
+

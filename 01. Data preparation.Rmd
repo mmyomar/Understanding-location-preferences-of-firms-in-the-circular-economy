@@ -1,0 +1,1107 @@
+---
+title: "Understanding location preferences of firms in the circular economy"
+author: "Maryam Omar & Merten Nefs"
+date: "2025-09-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+options(scipen = 999)
+
+```
+
+## 0. Introduction 
+
+This document details how the article's data was prepared.
+
+## 1. Set up libraries 
+
+```{r Import libraries}
+
+# import libraries 
+
+library(sf) 
+library(tidyverse)
+library(nngeo)
+library(cbsodataR)
+library(labelled)
+library(spdep)
+
+```
+
+## 2. Extract neighbourhood polygons and centrepoints 
+
+```{r Import and clean neighbourhood polygons and centrepoints}
+
+# import neighborhood polygon data 
+
+raw_nbhd <- st_read("data_raw/CBS/wijkenbuurten_2022_v3.gpkg", layer = "buurten")
+
+# remove unnecessary variables and rename
+
+nbhd_polygon <- raw_nbhd %>% 
+  select(buurtcode, buurtnaam) %>% 
+  rename(nbhd_code = buurtcode, 
+         nbhd_name = buurtnaam)
+
+# calculate centroid of each neighborhood 
+
+nbhd_centroid <- st_centroid(nbhd_polygon)
+
+
+```
+
+## 3. Prepare firm microdata and link to neighborhood level 
+
+The LISA dataset does not exist in the repository; authors are not permitted to share it in raw form.
+
+```{r Import firm data and sector classifications and merge the two}
+
+# import LISA data
+
+lisa <- readRDS("data_raw/LISA/2022.rds")
+
+# import file linking NPCE categories to SBI codes and file grouping standard sector classifications into broader groups
+
+npce <- read.csv("data_raw/Sector classifications/SBI-NPCE categories.csv", sep = ";")
+
+economic_sectors <- read.csv("data_raw/Sector classifications/samentellingen_bedrijfstakken.csv")
+
+# clean economic sector classifications
+
+economic_sectors <- economic_sectors %>% 
+  rename(sector = samentelling) %>% 
+  mutate(sector = gsub("-", "_", sub(" .*", "", sector)))
+
+# add firm id to LISA data and rename job variable from Dutch to English 
+
+lisa <- lisa %>% 
+    mutate(firm_id = row_number()) %>% 
+  rename(jobs = BANEN)
+
+# clean NPCE classifications
+
+npce1 <- npce %>% 
+  # remove whitespaces
+  mutate(SBI08_4 = trimws(SBI08_4), 
+         SBI08 = trimws(SBI08),
+         SBI08_3 = trimws(SBI08_3),
+  # ensure two digits are coded as three
+         SBI08_3 = ifelse(SBI08_3 == "22", "022",  
+                          ifelse(SBI08_3 == "24", "024", 
+                                 ifelse(SBI08_3 == "52", "052", 
+                                        ifelse(SBI08_3 == "53", "053", 
+                                               SBI08_3))))) %>% 
+  # rename variable name from Dutch to English 
+  rename(npce_category = npce_categorie) %>% 
+  # remove logistics as a separate CE category
+  filter(!npce_category == "keten faciliteren") %>% 
+  # rename categories from Dutch to English 
+  mutate(npce_category = ifelse(npce_category == "vermindering", 
+                                 "reduction", ifelse(npce_category == "substitutie", 
+                                                     "substitution", ifelse(npce_category == "hoogwaardige verwerking", 
+                                                                            "processing", ifelse(npce_category == "levensduurverlenging", "extension", NA)))))
+
+# remove whitespaces from SBI codes in LISA data
+
+data1 <- lisa %>% 
+  mutate(SBI08_4 = gsub("\\s", "", SBI08_4), 
+         SBI08 = gsub("\\s", "", SBI08),
+         SBI08_3 = gsub("\\s", "", as.character(SBI08_3)))
+
+# separate SBI levels (each pertaining to different sector detail level)  
+
+npce_08 <- npce1 %>%
+  filter(!is.na(SBI08)) %>% 
+  select(SBI08, npce_category)
+
+npce_08_4 <- npce1 %>%
+  filter(!is.na(SBI08_4)) %>% 
+  select(SBI08_4, npce_category)
+
+npce_08_3 <- npce1 %>%
+  filter(!is.na(SBI08_3)) %>% 
+  select(SBI08_3, npce_category)
+
+# link LISA microdata to NPCE categories 
+
+data2 <- data1 %>% 
+  left_join(., npce_08, by = c("SBI08")) %>% 
+  left_join(., npce_08_3, by = c("SBI08_3")) %>% 
+  left_join(., npce_08_4, by = c("SBI08_4"))
+
+# before continuing the joins and creating a final NPCE category variable we need to check if some firms are actually in multiple NPCE categories
+
+data2 %>%
+  mutate(
+    npce_list = pmap(list(npce_category.x, npce_category.y, npce_category),
+                     ~unique(na.omit(c(...)))),
+    npce_n = lengths(npce_list)  
+  ) %>%
+  filter(npce_n > 1)
+
+# firms cannot be in multiple NPCE categories so we can join with a mutually exclusive ifelse statement below
+
+data2 <- data2 %>% 
+  mutate(npce_category_final = ifelse(npce_category.x %in% c("reduction", "substitution", "processing", "extension"), 
+                                       npce_category.x, 
+                                       ifelse(npce_category.y %in% c("reduction", "substitution", "processing", "extension"), 
+                                              npce_category.y,
+                                              ifelse(npce_category %in% c("reduction", "substitution", "processing", "extension"), 
+                                                     npce_category, 
+                                                     NA)))) 
+
+# clean file 
+
+data3 <- data2 %>% 
+  # remove repeated variables
+  select(-c(npce_category.x, npce_category.y, npce_category)) %>% 
+  # rename
+  rename(npce_category = npce_category_final)
+
+# add standard sector classification groupings to LISA data 
+
+data4 <- data3 %>% 
+  mutate(SECTIE = trimws(SECTIE)) %>% 
+  left_join(., economic_sectors, by = "SECTIE")
+
+
+```
+
+```{r Clean microdata and add firm size indicator}
+
+# remove all unnecessary variables 
+
+data5 <- data4 %>% 
+  select(
+    # unique firm identifier
+    firm_id, 
+    
+    # NPCE category of firm: reduction, substitution, extension, processing, or NA (applies when a firm is not part of the circular economy)
+    npce_category, 
+    
+    # economic sector: A: Agriculture, forestry and fishing, B-F: Industry and energy, G-I: Commerce, transportation and hospitality, J-N: Commercial services, O-Q: Government and healthcare, R-U, Culture, recreation and other services.
+    sector, 
+    
+    # number of jobs in a firm 
+         jobs, 
+    
+    # x coordinate of a firm
+         XCOORD, 
+    
+    # y coordinate of a firm
+         YCOORD) 
+
+# exclude firms where coordinates are missing
+
+microdata <- data5 %>% 
+filter(!is.na(XCOORD) & !is.na(YCOORD))
+
+# add firm size dummy variables
+
+microdata <- microdata %>%
+  mutate(
+    # indicator if firm holds 0 jobs
+    size_zero = ifelse(jobs == 0, 1, 0),
+    
+    # indicator if firm holds 1 job
+    size_micro_selfemployed = ifelse(jobs ==1, 1, 0),
+    
+    # indicator if firm holds 2-9 jobs
+    size_micro_not_selfemployed = ifelse(jobs >=2 & jobs < 10, 1, 0),
+    
+    # indicator if firm holds 10-49
+    size_small = ifelse(jobs >=10 & jobs <50, 1, 0),
+    
+    # indicator if firm holds 50-249 jobs  
+    size_medium = ifelse(jobs >=50 & jobs <250, 1, 0),
+    
+    # indicator if firm holds 250 or more jobs 
+    size_large = ifelse(jobs >= 250, 1, 0))
+
+```
+
+```{r Clean building data and identify micro circular firms that are registered at home address}
+
+# import building data 
+
+buildings <- st_read("data_raw/BAG/pand_fixed.shp")
+
+# filter building data to buildings with residences 
+
+residential <- buildings |>
+  filter(gebr_woonf > 0)
+
+# set microdata as spatial dataset 
+
+microdata_sf <- microdata %>% 
+  st_as_sf(coords = c("XCOORD", "YCOORD"), remove = TRUE, crs = 28992)
+
+# create temporary microdata dataset with circular economy firms that only have 1 jobs
+
+self <- microdata_sf |>
+  filter(!is.na(npce_category) & size_micro_selfemployed == 1)
+
+# run spatial intersection linking firms to buildings with residences 
+
+int <- st_intersection(self, residential)  
+
+# pull firm IDs of firms with jobs == 1 that are registered in buildings with residences 
+
+self_resi <- int |> as_tibble() |> select(firm_id) 
+
+# replicate for firms with 0 jobs 
+
+# create temporary microdata dataset with circular economy firms that only have 0 jobs
+
+zero <- microdata_sf |>
+  filter(!is.na(npce_category) & size_zero == 1)
+
+# run spatial intersection linking firms to buildings with residences 
+
+int <- st_intersection(self, residential)  
+
+# pull firm IDs of firms with jobs == 0 that are registered in buildings with residences 
+
+zero_resi <- int |> as_tibble() |> select(firm_id)
+
+# import firm ids
+#self_resi <- read_rds("data_processed/self_resi.rds") 
+#zero_resi <- read_rds("data_processed/zero_resi.rds") 
+
+# add variable indicating whether firms with jobs == 0 or jobs == 1 are registered in buildings with residences 
+
+microdata <- microdata |> mutate(resident = case_when(
+  firm_id %in% self_resi$firm_id | firm_id %in% zero_resi$firm_id ~ 1,
+  .default = 0
+))
+
+```
+
+```{r Run spatial intersection linking firms to neighborhoods}
+
+# set microdata as sf 
+
+microdata_sf <- microdata %>% 
+  st_as_sf(coords = c("XCOORD", "YCOORD"), remove = TRUE, crs = 28992)
+
+# run spatial intersection . 
+
+microdata_nbhd <- st_intersection(nbhd_polygon, microdata_sf)
+
+```
+
+```{r Create a neighborhood-level table aggregating number of firms and number of jobs to each neighborhood}
+
+# Create reference tables to ensure all neighborhoods and sector categories appear in results (e.g. a neighborhood with 0 firms in a specific sector shows up as just that)
+
+ref_nbhd <- nbhd_polygon %>% 
+  st_drop_geometry() %>% 
+  select(nbhd_code, nbhd_name) %>% 
+  distinct()
+
+ref_npce <- microdata_nbhd %>%  
+  st_drop_geometry() %>% 
+  select(npce_category) %>% 
+  distinct() %>% 
+  filter(!is.na(npce_category))   
+
+ref_nbhd_npce <- crossing(ref_nbhd, ref_npce)
+
+ref_sector <- microdata_nbhd %>% 
+  st_drop_geometry() %>% 
+  select(sector) %>% 
+  distinct()  
+
+ref_nbhd_sector <- crossing(ref_nbhd, ref_sector)
+
+# Calculate number of firms (firms with > 1 employee only) in each CE pillar 
+
+nbhd_summary_ce_not_selfemployed_or_zero <- microdata_nbhd %>% 
+  st_drop_geometry() %>% 
+  filter(size_zero == 0 & size_micro_selfemployed == 0) %>%  # exclude firms with 0 or 1 employees
+    filter(!is.na(npce_category)) %>%  # only CE firms
+  group_by(nbhd_code, nbhd_name, npce_category) %>% 
+  summarise(nr_firms = n(), .groups = 'drop') %>%
+  right_join(ref_nbhd_npce, by = c("nbhd_code", "nbhd_name", "npce_category")) %>%
+  mutate(nr_firms = replace_na(nr_firms, 0)) %>%
+  pivot_wider(
+    names_from = npce_category,
+    names_prefix = "firms_",
+    names_glue = "firms_{npce_category}_size_not_selfemployed_or_zero", 
+    values_from = nr_firms,
+    values_fill = 0
+  )
+
+# Calculate number of firms (firms with > 1 employee only and firms with < 1 employee that are NOT in residential buildings) in each CE pillar 
+
+nbhd_summary_ce_not_selfemployed_or_zero_in_residential <- microdata_nbhd %>% 
+  st_drop_geometry() %>% 
+    filter(!is.na(npce_category)) %>%  # only CE firms
+  filter((size_zero == 0 & size_micro_selfemployed == 0) | # keep firms > 1 jobs 
+           ((size_zero == 1 | size_micro_selfemployed == 1) & resident == 0) # keep firms with 0 or 1 job that are not in residential buildings
+         ) %>%  
+  group_by(nbhd_code, nbhd_name, npce_category) %>% 
+  summarise(nr_firms = n(), .groups = 'drop') %>%
+  right_join(ref_nbhd_npce, by = c("nbhd_code", "nbhd_name", "npce_category")) %>%
+  mutate(nr_firms = replace_na(nr_firms, 0)) %>%
+  pivot_wider(
+    names_from = npce_category,
+    names_glue = "firms_{npce_category}_size_not_selfemployed_or_zero_in_residential",
+    values_from = nr_firms,
+    values_fill = 0
+  )
+
+# Calculate number of firms (all firm sizes) in each CE pillar 
+
+nbhd_summary_ce_all <- microdata_nbhd %>% 
+  st_drop_geometry() %>%
+  filter(!is.na(npce_category)) %>%  # Only CE firms
+  group_by(nbhd_code, nbhd_name, npce_category) %>% 
+  summarise(nr_firms = n(), .groups = 'drop') %>%
+  right_join(ref_nbhd_npce, by = c("nbhd_code", "nbhd_name", "npce_category")) %>%
+  mutate(nr_firms = replace_na(nr_firms, 0)) %>%
+  pivot_wider(
+    names_from = npce_category,
+    names_glue = "firms_{npce_category}_size_all",
+    values_from = nr_firms,
+    values_fill = 0
+  )
+
+
+# Calculate number of jobs (from firms of all sizes) by economic sector for each neighborhood
+
+nbhd_summary_sector <- microdata_nbhd %>% 
+  st_drop_geometry() %>%
+  group_by(nbhd_code, nbhd_name, sector) %>% 
+  summarise(jobs = sum(jobs), .groups = 'drop') %>%
+  right_join(ref_nbhd_sector, by = c("nbhd_code", "nbhd_name", "sector")) %>%
+  mutate(jobs = replace_na(jobs, 0)) %>%
+  pivot_wider(
+    names_from = sector,
+    names_prefix = "jobs_sector_",
+    values_from = jobs,
+    values_fill = 0
+  )
+
+# Calculate number of jobs (from firms of all sizes) per neighborhood (all sectors combined)
+
+nbhd_summary_total <- microdata_nbhd %>% 
+  st_drop_geometry() %>%
+  group_by(nbhd_code, nbhd_name) %>%
+  summarise(jobs_sector_all = sum(jobs), .groups = 'drop') %>%
+  right_join(ref_nbhd, by = c("nbhd_code", "nbhd_name")) %>%
+  mutate(jobs_sector_all = replace_na(jobs_sector_all, 0))
+
+# Combine all neighborhood firm/job statistics in one file 
+
+table_firms_jobs <- nbhd_summary_total %>% 
+  left_join(nbhd_summary_sector, by = c("nbhd_code", "nbhd_name")) %>% 
+  left_join(nbhd_summary_ce_not_selfemployed_or_zero, by = c("nbhd_code", "nbhd_name")) %>% 
+  left_join(nbhd_summary_ce_all, by = c("nbhd_code", "nbhd_name")) %>% 
+  left_join(nbhd_summary_ce_not_selfemployed_or_zero_in_residential, by = c("nbhd_code", "nbhd_name"))
+
+
+```
+
+
+## 4. Prepare infrastructure data and link to neighborhood level
+
+```{r Extract and clean highway data}
+
+# import raw data 
+
+raw_wegdeel <- st_read("data_raw/BRT/top10nl_Compleet-2022.gpkg", layer = "top10nl_wegdeel_hartlijn")
+
+# filter to used highway exits 
+
+highways <- raw_wegdeel %>% 
+  filter(!is.na(afritnummer)) %>% 
+  filter(typeweg == "autosnelweg") %>% 
+  filter(status == "in gebruik") 
+
+```
+
+```{r Extract and clean public transport data}
+
+# import raw data 
+
+raw_inrichtingselement <- st_read("data_raw/BRT/top10nl_Compleet-2022.gpkg", layer = "top10nl_inrichtingselement_punt")
+
+# filter to rail stations
+
+rail <- raw_inrichtingselement %>% 
+  filter(typeinrichtingselement %in% c("metrostation", "treinstation", "sneltramhalte"))
+
+```
+
+```{r Import and clean multimodal terminal data}
+
+# import raw data 
+
+raw_multimodal <- st_read("data_raw/Terminals/terminals.gpkg")
+
+# bimodal dataset 
+
+bimodal <- raw_multimodal %>% 
+  filter(Modal == "Bimodal") %>% 
+  select(Modal)
+
+# trimodal dataset 
+
+trimodal <- raw_multimodal %>% 
+  filter(Modal == "Trimodal") %>% 
+  select(Modal)
+
+```
+
+```{r Calculate distance to nearest rail, highway exit, bimodal terminal, and trimodal terminal}
+
+# transform crs where applicable 
+
+bimodal <- st_transform(bimodal, 28992)
+trimodal <- st_transform(trimodal, 28992)
+
+# calculate distance from centroid to rail (km) (logged)
+
+table_dist_rail  <- st_nn(nbhd_centroid, rail, returnDist = TRUE) %>% 
+  set_names("rail", "dist_rail") %>% 
+  map_df(unlist) %>% 
+  select(dist_rail) %>% 
+  bind_cols(nbhd_centroid %>% st_drop_geometry() %>% select(nbhd_code), .) %>% 
+  mutate(dist_rail = dist_rail / 1000) %>% 
+  mutate(log_dist_rail = log(dist_rail))
+
+# calculate distance from centroid to highway exits (km) (logged)
+
+table_dist_highway <- st_nn(nbhd_centroid, highways, returnDist = TRUE) %>% 
+  set_names("highway", "dist_highway") %>% 
+  map_df(unlist) %>% 
+  select(dist_highway) %>% 
+  bind_cols(nbhd_centroid %>% st_drop_geometry() %>% select(nbhd_code), .)%>% 
+    mutate(dist_highway = dist_highway / 1000)%>% 
+  mutate(log_dist_highway = log(dist_highway))
+
+# calculate distance from centroid to bimodal terminal (km) (logged)
+
+table_dist_bimodal <- st_nn(nbhd_centroid, bimodal, returnDist = TRUE) %>% 
+  set_names("bimodal", "dist_bimodal") %>% 
+  map_df(unlist) %>% 
+  select(dist_bimodal) %>% 
+  bind_cols(nbhd_centroid %>% st_drop_geometry() %>% select(nbhd_code), .)%>% 
+    mutate(dist_bimodal = dist_bimodal / 1000)%>% 
+  mutate(log_dist_bimodal = log(dist_bimodal))
+
+# calculate distance from centroid to trimodal terminal (km) (logged)
+
+table_dist_trimodal  <- st_nn(nbhd_centroid, trimodal, returnDist = TRUE) %>% 
+  set_names("trimodal", "dist_trimodal") %>% 
+  map_df(unlist) %>% 
+  select(dist_trimodal) %>% 
+  bind_cols(nbhd_centroid %>% st_drop_geometry() %>% select(nbhd_code), .) %>% 
+    mutate(dist_trimodal = dist_trimodal / 1000)%>% 
+  mutate(log_dist_trimodal = log(dist_trimodal))
+
+
+```
+
+```{r Import and clean electricity capacity data and link to postcode polygons}
+
+# import data 
+
+raw <- read.csv("data_raw/Netbeheer Nederland/congestie_pc6.csv", header = TRUE, sep = ";")
+
+postcode_polygon <- st_read("data_raw/CBS/cbs_pc6_2022_v2.gpkg")
+
+# recode missing values
+
+raw1 <- raw %>% 
+  mutate(afname = ifelse(afname == "-1,0", NA, afname)) 
+
+# rename categories and order   
+
+raw2 <- raw1 %>% 
+  mutate(afname = ifelse(afname == "0,0", 
+                         "Capacity available without a queue", 
+                         ifelse(afname == "1,0", 
+                                "Limited capacity available without a queue", 
+                                ifelse(afname == "2,0", 
+                                       "Area is under review with a queue", 
+                                       ifelse(afname == "3,0", 
+                                              "No capacity available", 
+                                              afname))))) %>% 
+  mutate(afname = factor(afname, levels = c("Capacity available without a queue", 
+                                            "Limited capacity available without a queue",
+                                            "Area is under review with a queue", 
+                                            "No capacity available"), 
+                         ordered = TRUE)) 
+
+# make sure postcodes have no zeros in them
+
+raw3 <- raw2 %>% 
+  mutate(postcode = gsub(pattern = " ", postcode, replacement = ""))
+
+# remove NAN from postcodes 
+
+raw4 <- raw3 %>% 
+  mutate(postcode = ifelse(postcode == "NAN", NA, postcode))
+
+# check if there are multiples in electricity dataset 
+
+multiples_df <- raw4 %>% group_by(postcode) %>% summarize(n = n()) %>% filter(n>1)
+
+multiples_list <- multiples_df$postcode
+
+# look at these values 
+
+multiples_viewer <- raw4 %>% 
+  filter(postcode %in% multiples_list)
+
+# there are multiple postcodes at times due to different providers
+# some have the same value for capacity, others don't 
+# others will be treated as NA 
+
+raw5 <- raw4 %>% 
+  mutate(afname = as.character(afname)) %>%   
+  mutate(afname = ifelse(postcode == "2106NC", 
+                         "Area is under review with a queue", 
+                         ifelse(postcode == "2342DM", 
+                                "Limited capacity available without a queue", 
+                                ifelse(postcode == "2553EG", 
+                                       "Capacity available without a queue", 
+                                       ifelse(postcode == "2761MP", 
+                                              "Limited capacity available without a queue", 
+                                              ifelse(postcode %in% c("2244VK", "2244VL", "2441ED", "6961BL", "7361BL", 
+                                                                     "7384AG", "7419PB", "7610AB", "8317PJ", "8356VS", 
+                                                                     "8374EA", "8374EP", "8374ET", "8374EV"), 
+                                                     NA, 
+                                                     afname))))))  
+
+
+# now i will get rid of irrelevant variables and make sure each postcode has only one observation
+
+raw6 <- raw5 %>% 
+  dplyr::select(postcode, afname) %>% 
+  dplyr::distinct() %>% 
+  mutate(postcode = trimws(postcode))
+
+cat("Number of observations:", nrow(raw6), "\n")
+cat("Number of unique postcodes:", n_distinct(raw6$postcode), "\n")
+
+# now add in geometries per postcode (pc6 level)
+
+postcode_polygon <- postcode_polygon %>% 
+  select(postcode6, geom) %>% 
+  mutate(postcode6 = trimws(postcode6)) %>% 
+  rename(postcode = postcode6)
+
+electricity <- raw6 %>% 
+  left_join(., postcode_polygon, by = "postcode")
+
+```
+
+```{r Summarize electricity capacity to neighborhood level}
+
+# calculate surface area of each neighborhood for reference (incl water and land)
+
+nbhd_polygon_with_area <- nbhd_polygon %>% 
+  mutate(nbhd_area = st_area(geom))
+
+# spatial intersection 
+
+electricity <- electricity %>% 
+  st_as_sf()
+
+join <- st_intersection(nbhd_polygon_with_area, electricity)
+
+# calculate area of postcode within neighbourhood 
+
+join1 <- join %>% 
+  mutate(postcode_area_intersection = st_area(geom))
+
+# summarize 
+
+table <- join1 %>% 
+  st_drop_geometry() %>% 
+  group_by(nbhd_code, afname) %>% 
+  summarize(area = sum(postcode_area_intersection)) %>% 
+  left_join(., nbhd_polygon_with_area, by = "nbhd_code")
+
+# now we want to create two tables
+# one table where we have neighbourhoods with only one electricity capacity value
+# then a table where we have neighbourhoods with more than one electricity capacity value
+# we'll clean this table then merge
+
+table_clean_A <- table %>% 
+  ungroup() %>% 
+  group_by(nbhd_code) %>% 
+  filter(n() == 1) %>% 
+  select(nbhd_code, afname)
+
+table_temp <- table %>% 
+  ungroup() %>% 
+  group_by(nbhd_code) %>% 
+  filter(n() > 1)
+
+# now for the neighbourhoods with more than one electricity capacity value we want to take the value of the highest surface area
+
+table_temp_1 <- table_temp %>% 
+  select(-nbhd_area) %>% 
+  ungroup() %>% 
+  group_by(nbhd_code) %>% 
+  mutate(total_area = sum(area)) %>% 
+  ungroup() %>% 
+  mutate(perc = area * 100 /total_area) 
+
+table_temp_2 <- table_temp_1 %>% # now slice 
+  group_by(nbhd_code) %>%
+  slice_max(order_by = perc, n = 1, with_ties = FALSE) %>%  
+  ungroup()
+  
+# now we merge
+
+table_clean_B <- table_temp_2 %>% 
+  select(nbhd_code, afname)
+
+table_clean <- rbind(table_clean_A, table_clean_B)
+
+# create standalone table and recategorize and reorder variable
+
+table_electricity <- table_clean %>% 
+  select(nbhd_code, afname) %>% 
+  rename(electricity_capacity = afname) %>% 
+    mutate(electricity_capacity = ifelse(electricity_capacity %in% 
+                                           c("Capacity available without a queue", 
+                                       "Limited capacity available without a queue"), 
+                         "Transport capacity available or limited", 
+                         ifelse(electricity_capacity %in% 
+                                  c( "Area is under review with a queue", "No capacity available"), 
+                                "Transport capacity under review or at a shortage", 
+                                NA))) %>% 
+  mutate(electricity_capacity = factor(electricity_capacity, levels = c("Transport capacity available or limited",
+  "Transport capacity under review or at a shortage"), 
+                         ordered = TRUE))
+
+
+```
+
+## 5. Prepare zoning data and link to neighborhood level
+
+```{r Import and clean business park data}
+
+# load raw data 
+
+raw <- st_read("data_raw/IBIS/ibis_openbaar.shp")
+
+# keep only maximum nuisance category and ID number
+
+businesspark <- raw %>% 
+  select(RIN_NUMMER, MAX_MILIEU)
+
+# recode NAs
+
+businesspark <- businesspark %>% 
+  mutate(MAX_MILIEU = ifelse(MAX_MILIEU == "X", 
+                             NA, MAX_MILIEU))
+
+
+```
+
+```{r Summarize business park data to neighborhood level}
+
+# check for invalid geometries 
+
+summary(st_is_valid(nbhd_polygon))
+
+summary(st_is_valid(businesspark))
+
+# fix invalid geometries 
+
+businesspark <- st_make_valid(businesspark)
+
+# spatial intersection; this produces neighbourhoods with business parks 
+
+join <- st_intersection(nbhd_polygon, businesspark)
+
+# calculate area of business park that lies within neighbourhood and remove if <10.000m2
+
+join1 <- join %>% 
+  mutate(rin_area_intersect = as.numeric(st_area(geom))) %>% 
+  filter(rin_area_intersect>=10000) 
+
+# summarize (and take mode in case nr of business parks are > 1 in neighborhood)
+
+join2 <- join1 %>%
+  select(nbhd_code, nbhd_name, RIN_NUMMER, MAX_MILIEU) %>%
+  group_by(nbhd_code, nbhd_name) %>%
+  mutate(mode_max_milieu = {
+    x <- as.numeric(MAX_MILIEU)
+    x_no_na <- na.omit(x)
+    
+    if (length(x_no_na) == 0) {
+      NA   
+    } else {
+      tab <- table(x_no_na)
+      as.numeric(names(which.max(tab)))
+    }
+  }) %>%
+  ungroup() %>% 
+  st_drop_geometry() %>% 
+  group_by(nbhd_code, nbhd_name) %>%
+  mutate(nr_business_parks = n()) %>% 
+  select(-c(RIN_NUMMER, MAX_MILIEU)) %>% 
+  distinct() %>% 
+  mutate(mode_max_milieu = as.character(mode_max_milieu), 
+         mode_max_milieu = ifelse(is.na(mode_max_milieu), 
+                                  "unknown", 
+                                  mode_max_milieu))
+
+# create standalone table  
+
+table_businesspark <- join2 %>% 
+  select(nbhd_code, nbhd_name, nr_business_parks, mode_max_milieu) %>% 
+  # Join with reference table to include all neighborhoods
+  right_join(ref_nbhd, by = c("nbhd_code", "nbhd_name")) %>%
+  # Replace NAs with appropriate values
+  mutate(
+    nr_business_parks = replace_na(nr_business_parks, 0),
+    mode_max_milieu_cat = ifelse(mode_max_milieu %in% c("1", "2", "3", "unknown"), 
+                                      "Business park present, other/unknown nuisance category", 
+                                      ifelse(mode_max_milieu %in% c("4", "5", "6"), 
+                                             "Business park present, high nuisance category", 
+                                             "Business park not present"))
+  ) %>% 
+  rename(business_park = mode_max_milieu_cat) %>% 
+  # drop unnecessary variables
+  select(nbhd_code, nbhd_name, business_park)
+
+```
+
+
+## 6. Prepare surrounding economic activity data and link to neighborhood level 
+
+```{r Calculate location quotients}
+
+# Calculate Netherlands-level totals for location quotient
+nl_summary_sector <- microdata_nbhd %>% 
+  st_drop_geometry() %>%
+  group_by(sector) %>% 
+  summarise(jobs_NL = sum(jobs), .groups = 'drop')
+
+jobs_sector_all_NL <- sum(nl_summary_sector$jobs_NL)
+
+# Pivot NL summary to wide format for easier joining
+nl_summary_wide <- nl_summary_sector %>%
+  pivot_wider(
+    names_from = sector,
+    names_prefix = "jobs_sector_",
+    names_glue = "jobs_sector_{sector}_NL",
+    values_from = jobs_NL
+  )
+
+# Calculate LQ for each sector and categorize
+table_lq <- table_firms_jobs %>% 
+  st_drop_geometry() %>% 
+  # Add NL totals
+  mutate(jobs_sector_all_NL = jobs_sector_all_NL) %>% 
+  bind_cols(nl_summary_wide) %>% 
+  # Calculate LQ for each sector
+  {
+    df <- .
+    sector_cols <- names(df)[grepl("^jobs_sector_", names(df)) & 
+                              !grepl("_NL$", names(df)) & 
+                              names(df) != "jobs_sector_all"]
+    
+    for (sector_col in sector_cols) {
+      nl_col <- paste0(sector_col, "_NL")
+      lq_col <- gsub("jobs_sector_", "LQ_", sector_col)
+      
+      df <- df %>%
+        mutate(
+          !!lq_col := case_when(
+            jobs_sector_all == 0 ~ NA_real_,
+            TRUE ~ (.data[[sector_col]] / jobs_sector_all) / 
+                    (.data[[nl_col]] / jobs_sector_all_NL)
+          )
+        )
+    }
+    df
+  } %>% 
+  select(nbhd_code, nbhd_name, starts_with("LQ_")) %>% 
+  # Categorize LQ values into over/underrepresentation
+  {
+    df <- .
+    lq_cols <- names(df)[grepl("^LQ_", names(df))]
+    
+    for (lq_col in lq_cols) {
+      cat_col <- paste0(lq_col, "_category")
+      
+      df <- df %>%
+        mutate(
+          !!cat_col := factor(
+            ifelse(.data[[lq_col]] > 1, "Overrepresentation", "Underrepresentation"),
+            levels = c("Underrepresentation", "Overrepresentation")
+          )
+        )
+    }
+    df
+  }
+  
+
+```
+
+```{r Extract and clean degree of urbanization}
+
+# import data 
+
+raw <- cbs_get_data(id = "85318NED") 
+
+# remove unnecessary variables
+
+urban_municipality <- raw %>% 
+  dplyr::select(WijkenEnBuurten, SoortRegio_2, Gemeentenaam_1, Omgevingsadressendichtheid_117)
+
+# filter to neighborhoods 
+
+urban_municipality1 <- urban_municipality %>% 
+  filter(str_starts(SoortRegio_2, "Buurt")) 
+
+# remove variable labels
+
+var_label(urban_municipality1) <- NULL
+
+# clean variable names and remove irrelevant variables
+
+urban_municipality2 <- urban_municipality1 %>% 
+  rename(nbhd_code = WijkenEnBuurten, 
+         urbanization = Omgevingsadressendichtheid_117, 
+        municipality = Gemeentenaam_1) %>% # This is necessary to later link neighborhood to COROP region
+  select(-SoortRegio_2)
+
+# remove empty whitespaces 
+
+urban_municipality3 <- urban_municipality2 %>% 
+  mutate(nbhd_code = trimws(nbhd_code), 
+         municipality = trimws(municipality)) 
+
+# calculate log of degree of urbanization
+
+table_urban_municipality <- urban_municipality3 %>% 
+  mutate(log_urbanization = log(urbanization))
+
+
+```
+
+
+## 7. Prepare controls and link to neighborhood level
+
+```{r Prepare total number of jobs in a neighborhood}
+
+# This already exists (prepared in section 3)
+
+# All that is needed to be done is to log it
+
+table_firms_jobs <- table_firms_jobs %>% 
+      mutate(log_jobs_sector_all = log(jobs_sector_all))
+
+
+```
+
+```{r Import and clean COROP data}
+
+# load data 
+
+corop <- read.csv2("data_raw/CBS/Gebieden_in_Nederland_2022_01072025_125645.csv")
+
+# rename variables and trim whitespaces  
+
+corop1 <- corop %>% 
+  rename(municipality = Regio.s, 
+         corop = Lokaliseringen.van.gemeenten.COROP.gebieden.Naam..naam.) %>% 
+  mutate(municipality = trimws(municipality), 
+         corop = trimws(corop)) 
+
+# check differences between the list of municipalities in urban_municipality table and the list of municipalities in this table 
+
+setdiff(unique(table_urban_municipality$municipality), unique(corop1$municipality)) 
+
+# address differences 
+
+table_corop <- corop1 %>% # remove everything after "(" as well as whitespaces
+  mutate(municipality = ifelse(str_detect(municipality, 
+                                    "^(Groningen|Hengelo|Utrecht|Laren|'s-Gravenhage|Rijswijk|Middelburg|Beek|Stein)"),
+                               trimws(sub(" \\(.*", "", municipality)),
+                               municipality))
+
+# check if differences do not exist anymore
+
+setdiff(unique(table_urban_municipality$municipality), unique(table_corop$municipality))  
+setdiff(unique(table_corop$municipality), unique(table_urban_municipality$municipality)) 
+
+```
+
+## 8. Create final neighborhood level dataset
+
+```{r Join all tables into one}
+
+base0 <- nbhd_polygon %>% 
+  left_join(table_firms_jobs, by = c("nbhd_code", "nbhd_name")) %>% 
+  left_join(table_dist_rail, by = "nbhd_code") %>% 
+  left_join(table_dist_highway, by = "nbhd_code") %>% 
+  left_join(table_dist_bimodal, by = "nbhd_code") %>% 
+  left_join(table_dist_trimodal, by = "nbhd_code") %>% 
+  left_join(table_electricity, by = "nbhd_code") %>% 
+  left_join(table_businesspark, by = c("nbhd_code", "nbhd_name")) %>% 
+  left_join(table_urban_municipality, by = "nbhd_code") %>% 
+  left_join(table_corop, by = "municipality") %>% 
+  left_join(table_lq, by = c("nbhd_code", "nbhd_name"))
+
+```
+
+```{r Finalize sample of neighborhoods}
+
+# Remove neighorhoods where urbanization data is unavailable
+
+base1 <- base0 %>% 
+  filter(!is.na(urbanization))
+
+# Remove neighborhoods where electricity capacity data is unavailable 
+
+base2 <- base1 %>% 
+  filter(!is.na(electricity_capacity))
+
+# Remove neighborhoods with no jobs regardless of sector
+
+base3 <- base2 %>% 
+  filter(jobs_sector_all > 0)
+
+# Inspect variables with NAs for faults
+
+colSums(is.na(base3))
+
+
+```
+
+```{r Transform categorical variables to dummy variables}
+
+base4 <- base3
+
+# This is needed to eventually calculate spatial lags
+
+business_park_dummies <- model.matrix(~ business_park - 1, data = base4)
+base4 <- cbind(base4, business_park_dummies)
+
+electricity_capacity_dummies <- model.matrix(~ electricity_capacity - 1, data = base4)
+base4 <- cbind(base4, electricity_capacity_dummies)
+
+LQ_A_dummies <- model.matrix(~ `LQ_A_category` - 1, data = base4)
+base4 <- cbind(base4, LQ_A_dummies)
+
+LQ_B_F_dummies <- model.matrix(~ LQ_B_F_category - 1, data = base4)
+base4 <- cbind(base4, LQ_B_F_dummies)
+
+LQ_G_I_dummies <- model.matrix(~ LQ_G_I_category - 1, data = base4)
+base4 <- cbind(base4, LQ_G_I_dummies)
+
+LQ_J_N_dummies <- model.matrix(~ LQ_J_N_category - 1, data = base4)
+base4 <- cbind(base4, LQ_J_N_dummies)
+
+LQ_O_Q_dummies <- model.matrix(~ LQ_O_Q_category - 1, data = base4)
+base4 <- cbind(base4, LQ_O_Q_dummies)
+
+LQ_R_U_dummies <- model.matrix(~ LQ_R_U_category - 1, data = base4)
+base4 <- cbind(base4, LQ_R_U_dummies)
+```
+
+```{r Calculate spatial lags}
+
+base5 <- base4
+
+# define neighbouring polygons, adopting contiguous neighbor definition (at least one vertex shared, not one edge)
+
+neighbors <- poly2nb(base5, queen=TRUE)
+
+# identify polygons without neighbours  
+
+no_neighbors <- which(card(neighbors) == 0)
+
+# recalculate neighbours for those with no neighbours, using higher snap of 400 meters
+
+neighbors_high_snap <- poly2nb(base5, snap = 400, queen = TRUE)
+
+# update those in original neighbour list 
+
+for (i in no_neighbors) {
+  neighbors[[i]] <- neighbors_high_snap[[i]]
+}
+
+# create spatial weights object to reflect intensity of geographic relationship between observations
+
+weights <- nb2listw(neighbors, 
+                    style = "W") # row standardised 
+
+
+# define variables for which we want spatial lags to be created
+
+vars_lag <- c(
+  "LQ_R_U_categoryOverrepresentation", 
+  "LQ_O_Q_categoryOverrepresentation", 
+  "LQ_J_N_categoryOverrepresentation", 
+  "LQ_G_I_categoryOverrepresentation", 
+  "LQ_B_F_categoryOverrepresentation", 
+  "LQ_A_categoryOverrepresentation", 
+  "log_urbanization", 
+  "business_parkBusiness.park.present..high.nuisance.category", 
+  "business_parkBusiness.park.present..other.unknown.nuisance.category" ,
+  "log_jobs_sector_all")
+
+# calculate spatial lags 
+
+for (var in vars_lag) {
+  lag_var_name <- paste0("W_", var)                     
+  base5[[lag_var_name]] <- lag.listw(weights, base5[[var]], zero.policy = TRUE)
+} 
+
+
+```
+
+```{r Select only variables relevant for modelling, descriptives, or identification}
+
+data_model <- base5 %>% 
+  select(nbhd_code, nbhd_name, 
+         contains("residential"),
+         log_dist_highway,
+         log_dist_bimodal, 
+         log_dist_trimodal,
+         log_dist_rail,
+         dist_highway,
+         dist_bimodal, 
+         dist_trimodal,
+         dist_rail,
+         electricity_capacity,
+         electricity_capacityTransport.capacity.under.review.or.at.a.shortage,
+         business_park,
+         business_parkBusiness.park.present..high.nuisance.category, 
+         business_parkBusiness.park.present..other.unknown.nuisance.category, 
+         urbanization,
+         log_urbanization,
+         LQ_A_categoryOverrepresentation, 
+         LQ_B_F_categoryOverrepresentation, 
+         LQ_G_I_categoryOverrepresentation, 
+         LQ_J_N_categoryOverrepresentation, 
+         LQ_O_Q_categoryOverrepresentation, 
+         LQ_R_U_categoryOverrepresentation, 
+          LQ_A_category, 
+         LQ_B_F_category, 
+         LQ_G_I_category, 
+         LQ_J_N_category, 
+         LQ_O_Q_category, 
+         LQ_R_U_category, 
+         jobs_sector_all,
+         log_jobs_sector_all, 
+         corop, 
+          starts_with("W_")) 
+```
+

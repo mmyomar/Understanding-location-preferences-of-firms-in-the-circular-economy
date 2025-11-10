@@ -1,0 +1,931 @@
+---
+title: "Understanding location preferences of firms in the circular economy"
+author: "Maryam Omar"
+date: "2025-09-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen = 999)
+
+```
+
+## 0. Introduction
+
+This document details how the article's data was modeled to come to conclusions.
+
+## 1. Set up libraries and import data 
+
+```{r Import libraries}
+
+library(sf) 
+library(tidyverse)
+library(nngeo)
+library(cbsodataR)
+library(labelled)
+library(spdep)
+library(glmmTMB)
+library(performance)
+library(broom.mixed)
+library(DHARMa)
+library(vtable)
+
+
+```
+
+```{r Import data prepared earlier}
+
+data_model <- readRDS("data_processed/data_model.rds")
+
+weights <- readRDS("data_processed/weights.rds")
+
+```
+
+## 2. Define independent variables to be used in all models 
+
+```{r Define independent variables}
+
+# define independent variables 
+
+independent_vars <- "log_dist_highway + 
+        log_dist_bimodal + 
+        log_dist_trimodal + 
+        log_dist_rail + 
+        electricity_capacityTransport.capacity.under.review.or.at.a.shortage +
+        business_parkBusiness.park.present..high.nuisance.category +
+        business_parkBusiness.park.present..other.unknown.nuisance.category +
+        log_urbanization +
+        LQ_A_categoryOverrepresentation + 
+        LQ_B_F_categoryOverrepresentation +
+        LQ_G_I_categoryOverrepresentation +
+        LQ_J_N_categoryOverrepresentation +
+        LQ_O_Q_categoryOverrepresentation +
+        LQ_R_U_categoryOverrepresentation +
+        log_jobs_sector_all +
+        corop + 
+        W_business_parkBusiness.park.present..high.nuisance.category +
+        W_business_parkBusiness.park.present..other.unknown.nuisance.category +
+        W_log_urbanization +
+        W_LQ_A_categoryOverrepresentation + 
+        W_LQ_B_F_categoryOverrepresentation +
+        W_LQ_G_I_categoryOverrepresentation +
+        W_LQ_J_N_categoryOverrepresentation +
+        W_LQ_O_Q_categoryOverrepresentation +
+        W_LQ_R_U_categoryOverrepresentation +
+        W_log_jobs_sector_all"
+
+# variable name mapping for cleaner presentation
+
+independent_vars_labels <- c(
+  "log_dist_highway" = "ln(Distance to highway)",
+  "log_dist_bimodal" = "ln(Distance to bimodal terminal)",
+  "log_dist_trimodal" = "ln(Distance to trimodal terminal)",
+  "log_dist_rail" = "ln(Distance to rail transit station)",
+  "electricity_capacityTransport.capacity.under.review.or.at.a.shortage" = "Electricity transport capacity under review or at a shortage",
+  "business_parkBusiness.park.present..high.nuisance.category" = "Business park present, high nuisance category",
+  "business_parkBusiness.park.present..other.unknown.nuisance.category" = "Business park present, other/unknown nuisance category",
+  "log_urbanization" = "ln(Degree of urbanization)",
+  "LQ_A_categoryOverrepresentation" = "Overrepresentation of jobs in agriculture, forestry and fishing",
+  "LQ_B_F_categoryOverrepresentation" = "Overrepresentation of jobs in industry and energy",
+  "LQ_G_I_categoryOverrepresentation" = "Overrepresentation of jobs in commerce, transportation and hospitality",
+  "LQ_J_N_categoryOverrepresentation" = "Overrepresentation of jobs in commercial services",
+  "LQ_O_Q_categoryOverrepresentation" = "Overrepresentation of jobs in government and healthcare",
+  "LQ_R_U_categoryOverrepresentation" = "Overrepresentation of jobs in culture, recreation and other services",
+  "log_jobs_sector_all" = "ln(Number of jobs)",
+  "W_business_parkBusiness.park.present..high.nuisance.category" = "Spatial lag - Business park present, high nuisance category",
+  "W_business_parkBusiness.park.present..other.unknown.nuisance.category" = "Spatial lag - Business park present, other/unknown nuisance category",
+  "W_log_urbanization" = "Spatial lag - ln(Degree of urbanization)",
+  "W_LQ_A_categoryOverrepresentation" = "Spatial lag - Overrepresentation of jobs in agriculture, forestry and fishing",
+  "W_LQ_B_F_categoryOverrepresentation" = "Spatial lag - Overrepresentation of jobs in industry and energy",
+  "W_LQ_G_I_categoryOverrepresentation" = "Spatial lag - Overrepresentation of jobs in commerce, transportation and hospitality",
+  "W_LQ_J_N_categoryOverrepresentation" = "Spatial lag - Overrepresentation of jobs in commercial services",
+  "W_LQ_O_Q_categoryOverrepresentation" = "Spatial lag - Overrepresentation of jobs in government and healthcare",
+  "W_LQ_R_U_categoryOverrepresentation" = "Spatial lag - Overrepresentation of jobs in culture, recreation and other services",
+  "W_log_jobs_sector_all" = "Spatial lag - ln(Number of jobs)"
+)
+
+
+
+```
+
+## 11. Run basic Poisson model and assess model assumptions 
+
+```{r Run Poisson models}
+
+# run poisson model  
+
+poisson_extension <- glmmTMB(
+  as.formula(paste("firms_extension_size_not_selfemployed_or_zero_in_residential ~", independent_vars)),
+  data = data_model,
+  family = "poisson")
+
+poisson_substitution <- glmmTMB(
+  as.formula(paste("firms_substitution_size_not_selfemployed_or_zero_in_residential ~", independent_vars)),
+  data = data_model,
+  family = "poisson")
+
+poisson_reduction <- glmmTMB(
+  as.formula(paste("firms_reduction_size_not_selfemployed_or_zero_in_residential ~", independent_vars)),
+  data = data_model,
+  family = "poisson")
+
+poisson_processing <- glmmTMB(
+  as.formula(paste("firms_processing_size_not_selfemployed_or_zero_in_residential ~", independent_vars)),
+  data = data_model,
+  family = "poisson")
+
+
+```
+
+```{r Check for overdispersion}
+
+# run overdispersion test indicating if mean is not equal to variance 
+
+res_reduction <- check_overdispersion(poisson_reduction)
+res_substitution <- check_overdispersion(poisson_substitution)
+res_extension <- check_overdispersion(poisson_extension)
+res_processing <- check_overdispersion(poisson_processing)
+
+# put into table 
+
+data.frame(
+  `Dependent variable` = c(
+    'Number of firms in reduction of raw material usage',
+    'Number of firms in substitution of raw materials',
+    'Number of firms in extension of product lifetime',
+    'Number of firms in high-grade processing'
+  ),
+  `Dispersion ratio` = round(c(
+    res_reduction$dispersion_ratio,
+    res_substitution$dispersion_ratio,
+    res_extension$dispersion_ratio,
+    res_processing$dispersion_ratio
+  ), 2),
+  `Pearson's Chi-Squared` = round(c(
+    res_reduction$chisq,
+    res_substitution$chisq,
+    res_extension$chisq,
+    res_processing$chisq
+  ), 0),
+  `P-value` = round(signif(c(
+    res_reduction$p_value,
+    res_substitution$p_value,
+    res_extension$p_value,
+    res_processing$p_value
+  ), 2), 2),
+  check.names = FALSE
+)
+# according to the results, overdispersion is an issue for extension and processing firms, therefore warranting a negative binomial
+
+```
+
+```{r Check for spatial dependence}
+
+# define variables
+
+variables <- c("firms_processing_size_not_selfemployed_or_zero_in_residential", "firms_extension_size_not_selfemployed_or_zero_in_residential", "firms_reduction_size_not_selfemployed_or_zero_in_residential", "firms_substitution_size_not_selfemployed_or_zero_in_residential")
+
+var_labels <- c(
+  "Reduction of raw material usage",
+  "Substitution of raw materials",
+  "Extension of product lifetime",
+  "High-grade processing"
+)
+
+# run Moran's I test and display results
+
+data.frame(
+  `Dependent variable` = var_labels,
+  `Moran's I` = sapply(variables, function(var) {
+    round(moran.test(data_model[[var]], weights)$estimate[1], 2)
+  }),
+  `P-value` = sapply(variables, function(var) {
+    sprintf("%.2f", round(moran.test(data_model[[var]], weights)$p.value, 2))
+  }),
+  check.names = FALSE,
+  row.names = NULL
+)
+
+# p value < 0.05 indicates spatial autocorrelation
+
+
+```
+
+```{r Check for linearity}
+
+# some continuous variables to test
+
+cont_vars <- c(
+  "dist_rail", 
+  "dist_highway", 
+  "dist_bimodal", 
+  "dist_trimodal", 
+  "urbanization", 
+  "jobs_sector_all"
+)
+
+# dependent variables
+
+model_vars <- c(
+  "firms_reduction_size_not_selfemployed_or_zero_in_residential",
+  "firms_substitution_size_not_selfemployed_or_zero_in_residential",
+  "firms_extension_size_not_selfemployed_or_zero_in_residential",
+  "firms_processing_size_not_selfemployed_or_zero_in_residential"
+)
+
+# Loop over continuous variables and display plots
+for (cont_var in cont_vars) {
+  
+  sumstats_long <- data_model |>
+    st_drop_geometry() |>
+    pivot_longer(cols = all_of(model_vars), 
+                 names_to = "variable", 
+                 values_to = "value") |>
+    group_by(across(all_of(cont_var)), variable) |>
+    summarise(mean = mean(value, na.rm = TRUE), .groups = "drop") |>
+    mutate(log_mean = log(mean))
+  
+  p <- ggplot(sumstats_long, aes_string(x = cont_var, y = "log_mean")) +
+    geom_point() +
+    geom_smooth(method = "loess", linewidth = 1.5) +
+    facet_wrap(~ variable, scales = "free_y") +
+    labs(title = paste(cont_var)) +
+    theme_classic()  
+  
+  print(p)
+}
+
+# non linearity exists 
+
+
+```
+
+## 12. Run final Poisson and negative binomial models 
+
+```{r Run final models}
+
+# run models
+
+poisson_reduction <- glmmTMB(
+  as.formula(paste("firms_reduction_size_not_selfemployed_or_zero_in_residential", "~", independent_vars)),
+  data = data_model,
+  family = poisson, 
+  control = glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+
+poisson_substitution <- glmmTMB(
+  as.formula(paste("firms_substitution_size_not_selfemployed_or_zero_in_residential", "~", independent_vars)),
+  data = data_model,
+  family = poisson, 
+  control = glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+
+negbinom_extension <- glmmTMB(
+  as.formula(paste("firms_extension_size_not_selfemployed_or_zero_in_residential ~", independent_vars)),
+  data = data_model,
+  family = nbinom2, 
+  control = glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+
+negbinom_processing <- glmmTMB(
+  as.formula(paste("firms_processing_size_not_selfemployed_or_zero_in_residential", "~", independent_vars)),
+  data = data_model,
+  family = nbinom2, 
+  control = glmmTMBControl(optCtrl=list(iter.max=1e5,eval.max=1e5)))
+
+# clean up results where:
+# coefficients are exponentiated to incidence rate ratios 
+# all numeric values are rounded to 2 decimal places
+# significance stars are added based on p-values
+# IRR, stars, and standard error are combined into one string
+#  log likelihood and degrees of freedom are added
+# variable names are cleaned up
+
+table_poisson_reduction <- tidy(poisson_reduction) %>%
+  mutate(exp_estimate = 
+                               exp(estimate)) %>%
+  mutate(across(where(is.numeric), ~ round(., 2))) %>% 
+  select(-statistic) %>% 
+  mutate(sig = case_when(
+    p.value < 0.01 ~ "***",
+    p.value < 0.05  ~ "**",
+    p.value < 0.10  ~ "*",
+    TRUE            ~ ""
+  )) %>% 
+  mutate(exp_estimate = paste0(exp_estimate, sig, "\n(", std.error, ")")) %>%
+  select(component, term, exp_estimate) %>% 
+    mutate(term = ifelse(term %in% names(independent_vars_labels), independent_vars_labels[term], term)) %>%
+  mutate(term = ifelse(startsWith(term, "corop"), gsub("corop", "NUTS-3 region - ", term), term)) %>%
+  pivot_wider(
+    names_from = component,
+    values_from = exp_estimate) %>% 
+   bind_rows(
+    tibble(
+      term = "Log likelihood",
+      cond = as.character(round(as.numeric(logLik(poisson_reduction)), 2))
+    ),
+    tibble(
+      term = "Residual degrees of freedom",
+      cond = as.character(attr(logLik(poisson_reduction), "df"))
+    ),
+    tibble(
+      term = "Number of observations",
+      cond = as.character(nobs(poisson_reduction))
+    )
+  ) %>% 
+    rename(Reduction = cond)
+
+
+table_poisson_substitution <- tidy(poisson_substitution) %>%
+  mutate(exp_estimate = 
+                               exp(estimate)) %>%
+  mutate(across(where(is.numeric), ~ round(., 2))) %>% 
+  select(-statistic) %>% 
+  mutate(sig = case_when(
+    p.value < 0.01 ~ "***",
+    p.value < 0.05  ~ "**",
+    p.value < 0.10  ~ "*",
+    TRUE            ~ ""
+  )) %>% 
+  mutate(exp_estimate = paste0(exp_estimate, sig, "\n(", std.error, ")")) %>%
+  select(component, term, exp_estimate) %>% 
+    mutate(term = ifelse(term %in% names(independent_vars_labels), independent_vars_labels[term], term)) %>%
+  mutate(term = ifelse(startsWith(term, "corop"), gsub("corop", "NUTS-3 region - ", term), term)) %>%
+  pivot_wider(
+    names_from = component,
+    values_from = exp_estimate) %>% 
+  bind_rows(
+    tibble(
+      term = "Log likelihood",
+      cond = as.character(round(as.numeric(logLik(poisson_reduction)), 2))
+    ),
+    tibble(
+      term = "Residual degrees of freedom",
+      cond = as.character(attr(logLik(poisson_reduction), "df"))
+    ),
+    tibble(
+      term = "Number of observations",
+      cond = as.character(nobs(poisson_reduction))
+    )
+  ) %>% 
+    rename(Substitution = cond)
+
+table_negbinom_processing <- tidy(negbinom_processing) %>%
+  mutate(exp_estimate = 
+                               exp(estimate)) %>%
+  mutate(across(where(is.numeric), ~ round(., 2))) %>% 
+  select(-statistic) %>% 
+  mutate(sig = case_when(
+    p.value < 0.01 ~ "***",
+    p.value < 0.05  ~ "**",
+    p.value < 0.10  ~ "*",
+    TRUE            ~ ""
+  )) %>% 
+  mutate(exp_estimate = paste0(exp_estimate, sig, "\n(", std.error, ")")) %>%
+  select(component, term, exp_estimate) %>% 
+    mutate(term = ifelse(term %in% names(independent_vars_labels), independent_vars_labels[term], term)) %>%
+  mutate(term = ifelse(startsWith(term, "corop"), gsub("corop", "NUTS-3 region - ", term), term)) %>%
+  pivot_wider(
+    names_from = component,
+    values_from = exp_estimate) %>% 
+   bind_rows(
+    tibble(
+      term = "Log likelihood",
+      cond = as.character(round(as.numeric(logLik(poisson_reduction)), 2))
+    ),
+    tibble(
+      term = "Residual degrees of freedom",
+      cond = as.character(attr(logLik(poisson_reduction), "df"))
+    ),
+    tibble(
+      term = "Number of observations",
+      cond = as.character(nobs(poisson_reduction))
+    )
+  ) %>% 
+    rename(Processing = cond)
+
+table_negbinom_extension <- tidy(negbinom_extension) %>%
+  mutate(exp_estimate = exp(estimate), 
+                               ) %>%
+  mutate(across(where(is.numeric), ~ round(., 2))) %>% 
+  select(-statistic) %>% 
+  mutate(sig = case_when(
+    p.value < 0.01 ~ "***",
+    p.value < 0.05  ~ "**",
+    p.value < 0.10  ~ "*",
+    TRUE            ~ ""
+  )) %>% 
+  mutate(exp_estimate = paste0(exp_estimate, sig, "\n(", std.error, ")")) %>%
+  select(component, term, exp_estimate) %>% 
+    mutate(term = ifelse(term %in% names(independent_vars_labels), independent_vars_labels[term], term)) %>%
+  mutate(term = ifelse(startsWith(term, "corop"), gsub("corop", "NUTS-3 region - ", term), term)) %>%
+  pivot_wider(
+    names_from = component,
+    values_from = exp_estimate) %>% 
+   bind_rows(
+    tibble(
+      term = "Log likelihood",
+      cond = as.character(round(as.numeric(logLik(poisson_reduction)), 2))
+    ),
+    tibble(
+      term = "Residual degrees of freedom",
+      cond = as.character(attr(logLik(poisson_reduction), "df"))
+    ),
+    tibble(
+      term = "Number of observations",
+      cond = as.character(nobs(poisson_reduction))
+    )
+  ) %>% 
+    rename(Extension = cond)
+
+# combine results into one table and clean again 
+
+table_poisson_reduction %>%
+  full_join(table_poisson_substitution, by = "term") %>%
+  full_join(table_negbinom_extension, by = "term") %>%
+  full_join(table_negbinom_processing, by = "term") %>% 
+  mutate(term = ifelse(term == "(Intercept)", "Intercept", term)) %>% 
+  rename(Term = term)  
+
+# make a shortened version of the table without controls and spatial lags
+
+table_poisson_reduction %>%
+  full_join(table_poisson_substitution, by = "term") %>%
+  full_join(table_negbinom_extension, by = "term") %>%
+  full_join(table_negbinom_processing, by = "term") %>% 
+  mutate(term = ifelse(term == "(Intercept)", "Intercept", term)) %>% 
+  rename(Term = term)  %>% 
+    slice(-c(16:65))
+
+
+```
+
+
+## 13. Assess models' goodness of fit
+
+```{r Assess residuals vs predicted}
+
+# extract residuals  
+
+res_reduction <- simulateResiduals(fittedModel = poisson_reduction)
+
+res_substitution <- simulateResiduals(fittedModel = poisson_substitution)
+
+res_extension <- simulateResiduals(fittedModel = negbinom_extension)
+
+res_processing <- simulateResiduals(fittedModel = negbinom_processing)
+
+# plot residuals vs predicted
+
+plotResiduals(res_reduction, smoothScatter = FALSE, quantreg = FALSE)  
+
+plotResiduals(res_substitution, smoothScatter = FALSE, quantreg = FALSE) 
+
+plotResiduals(res_extension, smoothScatter = FALSE, quantreg = FALSE)  
+
+plotResiduals(res_processing, smoothScatter = FALSE, quantreg = FALSE) 
+
+
+```
+
+```{r Run models without outliers}
+
+# identify outliers
+
+outliers_reduction <- outliers(res_reduction)
+
+outliers_substitution <- outliers(res_substitution)
+
+outliers_extension <- outliers(res_extension)
+
+outliers_processing <- outliers(res_processing)
+
+# remove outliers 
+
+data_reduction_no_outliers <- data_model %>% 
+  filter(!row_number() %in% outliers_reduction)
+
+data_substitution_no_outliers <- data_model %>% 
+  filter(!row_number() %in% outliers_substitution)
+
+data_extension_no_outliers <- data_model %>% 
+  filter(!row_number() %in% outliers_extension)
+
+data_processing_no_outliers <- data_model %>% 
+  filter(!row_number() %in% outliers_processing)
+
+# run models again 
+
+poisson_reduction_no_outliers <- glmmTMB(
+  as.formula(paste("firms_reduction_size_not_selfemployed_or_zero_in_residential", "~", independent_vars)),
+  data = data_reduction_no_outliers,
+  family = poisson, 
+  control = glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+
+poisson_substitution_no_outliers <- glmmTMB(
+  as.formula(paste("firms_substitution_size_not_selfemployed_or_zero_in_residential", "~", independent_vars)),
+  data = data_substitution_no_outliers,
+  family = poisson, 
+  control = glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+
+negbinom_extension_no_outliers <- glmmTMB(
+  as.formula(paste("firms_extension_size_not_selfemployed_or_zero_in_residential ~", independent_vars)),
+  data = data_extension_no_outliers,
+  family = nbinom2, 
+  control = glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+
+negbinom_processing_no_outliers <- glmmTMB(
+  as.formula(paste("firms_processing_size_not_selfemployed_or_zero_in_residential", "~", independent_vars)),
+  data = data_processing_no_outliers,
+  family = nbinom2, 
+  control = glmmTMBControl(optCtrl=list(iter.max=1e5,eval.max=1e5)))
+
+# clean results
+
+
+table_poisson_reduction_no_outliers <- tidy(poisson_reduction_no_outliers) %>%
+  mutate(exp_estimate = 
+                               exp(estimate)) %>%
+  mutate(across(where(is.numeric), ~ round(., 2))) %>% 
+  select(-statistic) %>% 
+  mutate(sig = case_when(
+    p.value < 0.01 ~ "***",
+    p.value < 0.05  ~ "**",
+    p.value < 0.10  ~ "*",
+    TRUE            ~ ""
+  )) %>% 
+  mutate(exp_estimate = paste0(exp_estimate, sig, "\n(", std.error, ")")) %>%
+  select(component, term, exp_estimate) %>% 
+    mutate(term = ifelse(term %in% names(independent_vars_labels), independent_vars_labels[term], term)) %>%
+  mutate(term = ifelse(startsWith(term, "corop"), gsub("corop", "NUTS-3 region - ", term), term)) %>%
+  pivot_wider(
+    names_from = component,
+    values_from = exp_estimate) %>% 
+   bind_rows(
+    tibble(
+      term = "Log likelihood",
+      cond = as.character(round(as.numeric(logLik(poisson_reduction)), 2))
+    ),
+    tibble(
+      term = "Residual degrees of freedom",
+      cond = as.character(attr(logLik(poisson_reduction), "df"))
+    ),
+    tibble(
+      term = "Number of observations",
+      cond = as.character(nobs(poisson_reduction))
+    )
+  ) %>% 
+    rename(`Reduction - Outliers removed` = cond)
+
+
+table_poisson_substitution_no_outliers <- tidy(poisson_substitution_no_outliers) %>%
+  mutate(exp_estimate = 
+                               exp(estimate)) %>%
+  mutate(across(where(is.numeric), ~ round(., 2))) %>% 
+  select(-statistic) %>% 
+  mutate(sig = case_when(
+    p.value < 0.01 ~ "***",
+    p.value < 0.05  ~ "**",
+    p.value < 0.10  ~ "*",
+    TRUE            ~ ""
+  )) %>% 
+  mutate(exp_estimate = paste0(exp_estimate, sig, "\n(", std.error, ")")) %>%
+  select(component, term, exp_estimate) %>% 
+    mutate(term = ifelse(term %in% names(independent_vars_labels), independent_vars_labels[term], term)) %>%
+  mutate(term = ifelse(startsWith(term, "corop"), gsub("corop", "NUTS-3 region - ", term), term)) %>%
+  pivot_wider(
+    names_from = component,
+    values_from = exp_estimate) %>% 
+  bind_rows(
+    tibble(
+      term = "Log likelihood",
+      cond = as.character(round(as.numeric(logLik(poisson_reduction)), 2))
+    ),
+    tibble(
+      term = "Residual degrees of freedom",
+      cond = as.character(attr(logLik(poisson_reduction), "df"))
+    ),
+    tibble(
+      term = "Number of observations",
+      cond = as.character(nobs(poisson_reduction))
+    )
+  ) %>% 
+    rename(`Substitution - Outliers removed` = cond)
+
+table_negbinom_extension_no_outliers <- tidy(negbinom_extension_no_outliers) %>%
+  mutate(exp_estimate = 
+                               exp(estimate)) %>%
+  mutate(across(where(is.numeric), ~ round(., 2))) %>% 
+  select(-statistic) %>% 
+  mutate(sig = case_when(
+    p.value < 0.01 ~ "***",
+    p.value < 0.05  ~ "**",
+    p.value < 0.10  ~ "*",
+    TRUE            ~ ""
+  )) %>% 
+  mutate(exp_estimate = paste0(exp_estimate, sig, "\n(", std.error, ")")) %>%
+  select(component, term, exp_estimate) %>% 
+    mutate(term = ifelse(term %in% names(independent_vars_labels), independent_vars_labels[term], term)) %>%
+  mutate(term = ifelse(startsWith(term, "corop"), gsub("corop", "NUTS-3 region - ", term), term)) %>%
+  pivot_wider(
+    names_from = component,
+    values_from = exp_estimate) %>% 
+   bind_rows(
+    tibble(
+      term = "Log likelihood",
+      cond = as.character(round(as.numeric(logLik(poisson_reduction)), 2))
+    ),
+    tibble(
+      term = "Residual degrees of freedom",
+      cond = as.character(attr(logLik(poisson_reduction), "df"))
+    ),
+    tibble(
+      term = "Number of observations",
+      cond = as.character(nobs(poisson_reduction))
+    )
+  ) %>% 
+    rename(`Extension - Outliers removed` = cond)
+
+table_negbinom_processing_no_outliers <- tidy(negbinom_processing_no_outliers) %>%
+  mutate(exp_estimate = exp(estimate), 
+                               ) %>%
+  mutate(across(where(is.numeric), ~ round(., 2))) %>% 
+  select(-statistic) %>% 
+  mutate(sig = case_when(
+    p.value < 0.01 ~ "***",
+    p.value < 0.05  ~ "**",
+    p.value < 0.10  ~ "*",
+    TRUE            ~ ""
+  )) %>% 
+  mutate(exp_estimate = paste0(exp_estimate, sig, "\n(", std.error, ")")) %>%
+  select(component, term, exp_estimate) %>% 
+    mutate(term = ifelse(term %in% names(independent_vars_labels), independent_vars_labels[term], term)) %>%
+  mutate(term = ifelse(startsWith(term, "corop"), gsub("corop", "NUTS-3 region - ", term), term)) %>%
+  pivot_wider(
+    names_from = component,
+    values_from = exp_estimate) %>% 
+   bind_rows(
+    tibble(
+      term = "Log likelihood",
+      cond = as.character(round(as.numeric(logLik(poisson_reduction)), 2))
+    ),
+    tibble(
+      term = "Residual degrees of freedom",
+      cond = as.character(attr(logLik(poisson_reduction), "df"))
+    ),
+    tibble(
+      term = "Number of observations",
+      cond = as.character(nobs(poisson_reduction))
+    )
+  ) %>% 
+    rename(`Processing - Outliers removed` = cond)
+
+# combine results into one table and clean again , combined with our results with outliers
+
+table_poisson_reduction %>% 
+  full_join(table_poisson_reduction_no_outliers, by = "term") %>%
+  full_join(table_poisson_substitution, by = "term") %>%
+  full_join(table_poisson_substitution_no_outliers, by = "term") %>%
+  full_join(table_negbinom_extension, by = "term") %>%
+  full_join(table_negbinom_extension_no_outliers, by = "term") %>%
+  full_join(table_negbinom_processing, by = "term") %>%
+  full_join(table_negbinom_processing_no_outliers, by = "term") %>% 
+  mutate(term = ifelse(term == "(Intercept)", "Intercept", term)) %>% 
+  rename(Term = term)  
+
+# make a shortened version of the table without controls and spatial lags, combined with our results with outliers
+
+table_results_short_with_and_without_outliers <- table_poisson_reduction %>% 
+  full_join(table_poisson_reduction_no_outliers, by = "term") %>%
+  full_join(table_poisson_substitution, by = "term") %>%
+  full_join(table_poisson_substitution_no_outliers, by = "term") %>%
+  full_join(table_negbinom_extension, by = "term") %>%
+  full_join(table_negbinom_extension_no_outliers, by = "term") %>%
+  full_join(table_negbinom_processing, by = "term") %>%
+  full_join(table_negbinom_processing_no_outliers, by = "term") %>% 
+  mutate(term = ifelse(term == "(Intercept)", "Intercept", term)) %>% 
+  rename(Term = term)  %>% 
+    slice(-c(16:65))
+
+# examine patterns in processing outliers 
+
+# select variables, not logged 
+
+vars <- c("firms_processing_size_not_selfemployed_or_zero_in_residential",
+          "firms_substitution_size_not_selfemployed_or_zero_in_residential",
+          "firms_extension_size_not_selfemployed_or_zero_in_residential",
+          "firms_reduction_size_not_selfemployed_or_zero_in_residential",
+          "dist_highway",
+          "dist_bimodal",
+          "dist_trimodal",
+          "dist_rail",
+          "electricity_capacity",
+          "business_park",
+          "urbanization",
+          "LQ_A_category",
+          "LQ_B_F_category",
+          "LQ_G_I_category",
+          "LQ_J_N_category",
+          "LQ_O_Q_category",
+          "LQ_R_U_category")
+
+# give variables titles 
+
+var_names <- c(
+  "Number of firms in high-grade processing" = "firms_processing_size_not_selfemployed_or_zero_in_residential",
+  "Number of firms in substitution of raw materials" = "firms_substitution_size_not_selfemployed_or_zero_in_residential",
+  "Number of firms in extension of product lifetime" = "firms_extension_size_not_selfemployed_or_zero_in_residential",
+  "Number of firms in reduction of raw material usage" = "firms_reduction_size_not_selfemployed_or_zero_in_residential",
+  "Distance to nearest highway exit (km)" = "dist_highway",
+  "Distance to nearest bimodal terminal (km)" = "dist_bimodal",
+  "Distance to nearest trimodal terminal (km)" = "dist_trimodal",
+  "Distance to nearest rail transit station (km)" = "dist_rail",
+  "Electricity grid congestion" = "electricity_capacity",
+  "Presence and nuisance level of business park" = "business_park",
+  "Degree of urbanization (average number of addresses/km)" = "urbanization",
+  "Concentration of jobs in agriculture, forestry and fishing" = "LQ_A_category",
+  "Concentration of jobs in industry and energy" = "LQ_B_F_category",
+  "Concentration of jobs in commerce, transportation and hospitality" = "LQ_G_I_category",
+  "Concentration of jobs in commercial services" = "LQ_J_N_category",
+  "Concentration of jobs in government and healthcare" = "LQ_O_Q_category",
+  "Concentration of jobs in culture, recreation and other services" = "LQ_R_U_category"
+)
+
+# extract only the outlier observations for processing
+data_processing_outliers_only <- data_model %>%
+  filter(row_number() %in% outliers_processing)
+
+# create descriptive table for processing outliers
+table_processing_outliers <- data_processing_outliers_only %>%
+  st_drop_geometry() %>%
+  select(all_of(vars)) %>%
+  rename(all_of(var_names)) %>%
+  mutate(across(c("Presence and nuisance level of business park", 
+                  "Electricity grid congestion"), as.factor))
+
+# create descriptive summary table
+summary_table_processing_outliers <- sumtable(table_processing_outliers, digits = 2, out = "return")
+summary_table_processing_outliers
+
+# no pattern showing
+
+
+```
+
+```{r Compare AIC and BIC}
+
+# Define independent variables without spatial lags
+independent_vars_no_lag <- "log_dist_highway + 
+        log_dist_bimodal + 
+        log_dist_trimodal + 
+        log_dist_rail + 
+        electricity_capacityTransport.capacity.under.review.or.at.a.shortage +
+        business_parkBusiness.park.present..high.nuisance.category +
+        business_parkBusiness.park.present..other.unknown.nuisance.category +
+        log_urbanization +
+        LQ_A_categoryOverrepresentation + 
+        LQ_B_F_categoryOverrepresentation +
+        LQ_G_I_categoryOverrepresentation +
+        LQ_J_N_categoryOverrepresentation +
+        LQ_O_Q_categoryOverrepresentation +
+        LQ_R_U_categoryOverrepresentation +
+        log_jobs_sector_all +
+        corop"
+
+# Run Poisson models without spatial lags
+
+poisson_reduction_no_lag <- glmmTMB(
+  as.formula(paste("firms_reduction_size_not_selfemployed_or_zero_in_residential", "~", independent_vars_no_lag)),
+  data = data_model,
+  family = poisson, 
+  control = glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+
+poisson_substitution_no_lag <- glmmTMB(
+  as.formula(paste("firms_substitution_size_not_selfemployed_or_zero_in_residential", "~", independent_vars_no_lag)),
+  data = data_model,
+  family = poisson, 
+  control = glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+
+poisson_extension_no_lag <- glmmTMB(
+  as.formula(paste("firms_extension_size_not_selfemployed_or_zero_in_residential ~", independent_vars_no_lag)),
+  data = data_model,
+  family = poisson, 
+  control = glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+
+poisson_processing_no_lag <- glmmTMB(
+  as.formula(paste("firms_processing_size_not_selfemployed_or_zero_in_residential", "~", independent_vars_no_lag)),
+  data = data_model,
+  family = poisson, 
+  control = glmmTMBControl(optCtrl=list(iter.max=1e5,eval.max=1e5)))
+
+# Run negative binomial models without spatial lags
+
+negbinom_reduction_no_lag <- glmmTMB(
+  as.formula(paste("firms_reduction_size_not_selfemployed_or_zero_in_residential", "~", independent_vars_no_lag)),
+  data = data_model,
+  family = nbinom2, 
+  control = glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+
+negbinom_substitution_no_lag <- glmmTMB(
+  as.formula(paste("firms_substitution_size_not_selfemployed_or_zero_in_residential", "~", independent_vars_no_lag)),
+  data = data_model,
+  family = nbinom2, 
+  control = glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+
+negbinom_extension_no_lag <- glmmTMB(
+  as.formula(paste("firms_extension_size_not_selfemployed_or_zero_in_residential ~", independent_vars_no_lag)),
+  data = data_model,
+  family = nbinom2, 
+  control = glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+
+negbinom_processing_no_lag <- glmmTMB(
+  as.formula(paste("firms_processing_size_not_selfemployed_or_zero_in_residential", "~", independent_vars_no_lag)),
+  data = data_model,
+  family = nbinom2, 
+  control = glmmTMBControl(optCtrl=list(iter.max=1e5,eval.max=1e5)))
+
+# Run negative binomial models with spatial lags for reduction and substitution
+
+negbinom_reduction_with_lag <- glmmTMB(
+  as.formula(paste("firms_reduction_size_not_selfemployed_or_zero_in_residential", "~", independent_vars)),
+  data = data_model,
+  family = nbinom2, 
+  control = glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+
+negbinom_substitution_with_lag <- glmmTMB(
+  as.formula(paste("firms_substitution_size_not_selfemployed_or_zero_in_residential", "~", independent_vars)),
+  data = data_model,
+  family = nbinom2, 
+  control = glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3)))
+
+# Table 1: Compare Poisson vs negative binomial (with spatial lags)
+# To justify choice of distribution family for all dependent variables
+
+family_comparison <- data.frame(
+  `Dependent variable` = rep(c(
+    'Reduction of raw material usage',
+    'Substitution of raw materials',
+    'Extension of product lifetime',
+    'High-grade processing'
+  ), each = 2),
+  `Family` = rep(c('Poisson', 'Negative binomial'), 4),
+  `AIC` = round(c(
+    AIC(poisson_reduction),
+    AIC(negbinom_reduction_with_lag),
+    AIC(poisson_substitution),
+    AIC(negbinom_substitution_with_lag),
+    AIC(poisson_extension),
+    AIC(negbinom_extension),
+    AIC(poisson_processing),
+    AIC(negbinom_processing)
+  ), 2),
+  `BIC` = round(c(
+    BIC(poisson_reduction),
+    BIC(negbinom_reduction_with_lag),
+    BIC(poisson_substitution),
+    BIC(negbinom_substitution_with_lag),
+    BIC(poisson_extension),
+    BIC(negbinom_extension),
+    BIC(poisson_processing),
+    BIC(negbinom_processing)
+  ), 2),
+  check.names = FALSE
+)
+
+family_comparison
+
+# Table 2: Compare chosen models with and without spatial lags
+# Reduction and substitution use Poisson
+# Extension and processing use negative binomial
+
+spatial_lag_comparison <- data.frame(
+  `Dependent variable` = rep(c(
+    'Reduction of raw material usage',
+    'Substitution of raw materials',
+    'Extension of product lifetime',
+    'High-grade processing'
+  ), each = 2),
+  `Spatial lags` = rep(c('Without spatial lags', 'With spatial lags'), 4),
+  `AIC` = round(c(
+    AIC(poisson_reduction_no_lag),
+    AIC(poisson_reduction),
+    AIC(poisson_substitution_no_lag),
+    AIC(poisson_substitution),
+    AIC(negbinom_extension_no_lag),
+    AIC(negbinom_extension),
+    AIC(negbinom_processing_no_lag),
+    AIC(negbinom_processing)
+  ), 2),
+  `BIC` = round(c(
+    BIC(poisson_reduction_no_lag),
+    BIC(poisson_reduction),
+    BIC(poisson_substitution_no_lag),
+    BIC(poisson_substitution),
+    BIC(negbinom_extension_no_lag),
+    BIC(negbinom_extension),
+    BIC(negbinom_processing_no_lag),
+    BIC(negbinom_processing)
+  ), 2),
+  check.names = FALSE
+)
+
+spatial_lag_comparison
+```
