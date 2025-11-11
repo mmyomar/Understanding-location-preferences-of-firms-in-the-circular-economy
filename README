@@ -1,3 +1,5 @@
 This repository concerns the research paper "Understanding location preferences of firms in the circular economy" by Nefs & Omar (2025). 
-You can find all the code used for the paper, as well as the final, neighborhood-level dataset used for  modelling and descriptives. Variable definitions can be inferred from the paper as well as the code.
+Here you can find: 
+1. The code used for the paper in R Markdown form. Where results and descriptives are concerned, the HTML form of the code is also provided so outputs can be viewed.
+2. The final, neighborhood-level dataset used for  modelling and descriptives. Variable definitions can be inferred from the paper as well as the code. 
 Due to data storage restrictions, as well as data sharing limitations, the raw data that was used is not shared. A list of sources can be found in the paper.
